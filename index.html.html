@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0a0a0a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Butterfly Control</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Butterfly Control","short_name":"Butterfly","start_url":".","display":"fullscreen","background_color":"%230a0a0a","theme_color":"%230a0a0a","icons":[{"src":"data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%A6%8B%3C/text%3E%3C/svg%3E","sizes":"192x192","type":"image/svg+xml"}]}'>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    height: 100%; overflow: hidden;
+    background: #0a0a0a; color: #eee;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    user-select: none; touch-action: none;
+  }
+  #app { display: flex; flex-direction: column; height: 100vh; padding: 16px; gap: 12px; }
+
+  header { display: flex; align-items: center; justify-content: space-between; }
+  h1 { font-size: 1.1em; color: #4af; font-weight: 600; letter-spacing: 0.5px; }
+  #status { font-size: 0.75em; color: #888; padding: 4px 10px; border-radius: 12px; background: #1a1a1a; }
+  #status.on { color: #4f4; background: #143014; }
+
+  #connect-btn {
+    background: #4af; color: #000; border: none; padding: 10px 18px;
+    border-radius: 8px; font-weight: 700; font-size: 0.9em;
+  }
+  #connect-btn:disabled { opacity: 0.4; }
+
+  .joystick-wrap {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    position: relative; min-height: 260px;
+  }
+  #joystick {
+    width: min(80vw, 340px); height: min(80vw, 340px);
+    border-radius: 50%;
+    background: radial-gradient(circle, #1a1a1a 0%, #0f0f0f 70%);
+    border: 2px solid #222; position: relative;
+  }
+  #knob {
+    width: 30%; height: 30%; border-radius: 50%;
+    background: radial-gradient(circle at 30% 30%, #6cf, #148);
+    position: absolute; top: 35%; left: 35%;
+    box-shadow: 0 0 20px rgba(68,170,255,0.4);
+    transition: box-shadow 0.1s;
+    pointer-events: none;
+  }
+  #knob.active { box-shadow: 0 0 30px rgba(68,170,255,0.9); }
+
+  .readout { display: flex; justify-content: space-around; font-size: 0.85em; }
+  .readout div { color: #888; }
+  .readout span { color: #4af; font-weight: 700; font-family: monospace; }
+
+  #stop-btn {
+    background: #b22; color: #fff; border: none; padding: 16px;
+    border-radius: 8px; font-weight: 700; font-size: 1em;
+    letter-spacing: 1px; text-transform: uppercase;
+  }
+  #stop-btn:active { background: #d33; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>🦋 Butterfly Control</h1>
+    <div id="status">Disconnected</div>
+  </header>
+
+  <button id="connect-btn">Connect</button>
+
+  <div class="joystick-wrap">
+    <div id="joystick"><div id="knob"></div></div>
+  </div>
+
+  <div class="readout">
+    <div>Throttle: <span id="val-thr">0%</span></div>
+    <div>Turn: <span id="val-turn">0</span></div>
+  </div>
+
+  <button id="stop-btn">EMERGENCY STOP</button>
+</div>
+
+<script>
+// ============================================================
+//  BLE UUIDs — must match the ESP32 firmware
+// ============================================================
+const SERVICE_UUID        = '12345678-1234-1234-1234-123456789abc';
+const CHARACTERISTIC_UUID = 'abcd1234-ab12-cd34-ef56-abcdef123456';
+
+// ============================================================
+//  State
+// ============================================================
+let bleDevice = null;
+let bleChar   = null;
+let connected = false;
+
+// Joystick values: throttle 0..100, turn -100..100
+let throttle = 0;
+let turn     = 0;
+
+// Send rate limit (ms)
+const SEND_INTERVAL = 50;
+let lastSend = 0;
+
+// ============================================================
+//  UI Elements
+// ============================================================
+const statusEl    = document.getElementById('status');
+const connectBtn  = document.getElementById('connect-btn');
+const joystickEl  = document.getElementById('joystick');
+const knobEl      = document.getElementById('knob');
+const thrValEl    = document.getElementById('val-thr');
+const turnValEl   = document.getElementById('val-turn');
+const stopBtn     = document.getElementById('stop-btn');
+
+// ============================================================
+//  BLE Connect
+// ============================================================
+connectBtn.addEventListener('click', async () => {
+  if (connected) { disconnect(); return; }
+
+  if (!navigator.bluetooth) {
+    alert('Web Bluetooth not supported. Use Chrome on Android.');
+    return;
+  }
+
+  try {
+    statusEl.textContent = 'Scanning...';
+    bleDevice = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }],
+      optionalServices: [SERVICE_UUID]
+    });
+
+    bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+    const server  = await bleDevice.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    bleChar       = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+    connected = true;
+    statusEl.textContent = 'Connected';
+    statusEl.classList.add('on');
+    connectBtn.textContent = 'Disconnect';
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Error';
+    statusEl.classList.remove('on');
+  }
+});
+
+function onDisconnected() {
+  connected = false;
+  statusEl.textContent = 'Disconnected';
+  statusEl.classList.remove('on');
+  connectBtn.textContent = 'Connect';
+  // Failsafe
+  throttle = 0; turn = 0;
+  updateReadout();
+}
+
+function disconnect() {
+  if (bleDevice && bleDevice.gatt.connected) bleDevice.gatt.disconnect();
+}
+
+// ============================================================
+//  Send command "T075 R-050"
+// ============================================================
+async function sendCommand() {
+  if (!connected || !bleChar) return;
+  const now = performance.now();
+  if (now - lastSend < SEND_INTERVAL) return;
+  lastSend = now;
+
+  const t = Math.round(throttle);
+  const r = Math.round(turn);
+  const cmd = `T${t.toString().padStart(3,'0')} R${r}\n`;
+
+  try {
+    await bleChar.writeValueWithoutResponse(new TextEncoder().encode(cmd));
+  } catch (err) {
+    console.warn('send failed', err);
+  }
+}
+
+// ============================================================
+//  Joystick logic
+// ============================================================
+const MAX_RADIUS_RATIO = 0.35; // knob max distance from center (as fraction of joystick size)
+let dragging = false;
+let joyRect  = null;
+let joySize  = 0;
+
+function updateJoyRect() {
+  joyRect = joystickEl.getBoundingClientRect();
+  joySize = joyRect.width;
+}
+
+window.addEventListener('resize', updateJoyRect);
+
+function startDrag(e) {
+  dragging = true;
+  knobEl.classList.add('active');
+  updateJoyRect();
+  moveDrag(e);
+}
+
+function moveDrag(e) {
+  if (!dragging) return;
+  e.preventDefault();
+
+  const touch = e.touches ? e.touches[0] : e;
+  const cx = joyRect.left + joySize / 2;
+  const cy = joyRect.top  + joySize / 2;
+
+  let dx = touch.clientX - cx;
+  let dy = touch.clientY - cy;
+
+  // Clamp to circle
+  const maxR = joySize * MAX_RADIUS_RATIO;
+  const dist = Math.hypot(dx, dy);
+  if (dist > maxR) {
+    dx = dx / dist * maxR;
+    dy = dy / dist * maxR;
+  }
+
+  // Move knob
+  const knobSize = knobEl.offsetWidth;
+  knobEl.style.left = (joySize/2 - knobSize/2 + dx) + 'px';
+  knobEl.style.top  = (joySize/2 - knobSize/2 + dy) + 'px';
+
+  // Map to control values
+  // X → turn (-100..100), Y up → throttle (0..100)
+  turn     = (dx / maxR) * 100;
+  throttle = (-dy / maxR) * 100;
+  throttle = Math.max(0, Math.min(100, throttle));   // clamp, no reverse
+  turn     = Math.max(-100, Math.min(100, turn));
+
+  updateReadout();
+}
+
+function endDrag() {
+  dragging = false;
+  knobEl.classList.remove('active');
+  // Return knob to center, and reset to idle
+  knobEl.style.left = '35%';
+  knobEl.style.top  = '35%';
+  throttle = 0;
+  turn     = 0;
+  updateReadout();
+}
+
+function updateReadout() {
+  thrValEl.textContent  = Math.round(throttle) + '%';
+  turnValEl.textContent = Math.round(turn);
+}
+
+// Touch events
+joystickEl.addEventListener('touchstart', startDrag, { passive: false });
+joystickEl.addEventListener('touchmove',  moveDrag,  { passive: false });
+joystickEl.addEventListener('touchend',   endDrag);
+joystickEl.addEventListener('touchcancel', endDrag);
+
+// Mouse fallback (for testing on desktop)
+joystickEl.addEventListener('mousedown', startDrag);
+window.addEventListener('mousemove', moveDrag);
+window.addEventListener('mouseup',   endDrag);
+
+// ============================================================
+//  Emergency stop
+// ============================================================
+stopBtn.addEventListener('click', () => {
+  throttle = 0;
+  turn = 0;
+  updateReadout();
+  // Force immediate send
+  lastSend = 0;
+  sendCommand();
+});
+
+// ============================================================
+//  Main send loop (20 Hz)
+// ============================================================
+setInterval(sendCommand, SEND_INTERVAL);
+
+updateJoyRect();
+updateReadout();
+</script>
+</body>
+</html>
